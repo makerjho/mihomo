@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/metacubex/mihomo/transport/fragment"
 	"net"
 	"net/netip"
 	"strconv"
@@ -53,6 +54,16 @@ type Vless struct {
 	restlsConfig    *restls.Config
 	jlsConfig       *jls.Config
 	realityConfig   *tlsC.RealityConfig
+	fragment        *fragment.Config
+}
+
+// dialTCP dials the server and applies ClientHello fragmentation if configured.
+func (v *Vless) dialTCP(ctx context.Context, addr string) (net.Conn, error) {
+	c, err := v.dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return fragment.Wrap(c, v.fragment), nil
 }
 
 type VlessOption struct {
@@ -88,6 +99,14 @@ type VlessOption struct {
 	PrivateKey        string            `proxy:"private-key,omitempty"`
 	ServerName        string            `proxy:"servername,omitempty"`
 	ClientFingerprint string            `proxy:"client-fingerprint,omitempty"`
+	FragmentOpts      FragmentOptions   `proxy:"fragment-opts,omitempty"` // NEXTRA_FRAGMENT_V1
+}
+
+// FragmentOptions splits the TLS ClientHello into several records (NEXTRA_FRAGMENT_V1).
+type FragmentOptions struct {
+	Length   string `proxy:"length,omitempty"`    // bytes per record, e.g. "50-100"
+	Interval string `proxy:"interval,omitempty"`  // ms between records, e.g. "10-20"
+	MaxSplit string `proxy:"max-split,omitempty"` // max records, e.g. "3-6"
 }
 
 type XHTTPOptions struct {
@@ -345,7 +364,7 @@ func (v *Vless) dialContext(ctx context.Context) (c net.Conn, err error) {
 		return v.xhttpClient.Dial(ctx)
 	default:
 	}
-	return v.dialer.DialContext(ctx, "tcp", v.addr)
+	return v.dialTCP(ctx, v.addr)
 }
 
 // DialContext implements C.ProxyAdapter
@@ -533,6 +552,10 @@ func NewVless(option VlessOption) (*Vless, error) {
 	if err != nil {
 		return nil, err
 	}
+	v.fragment, err = fragment.New(option.FragmentOpts.Length, option.FragmentOpts.Interval, option.FragmentOpts.MaxSplit)
+	if err != nil {
+		return nil, err
+	}
 	securityModes := make([]string, 0, 4)
 	if v.shadowTLSConfig != nil {
 		securityModes = append(securityModes, "ShadowTLS")
@@ -564,7 +587,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 		}
 	case "grpc":
 		dialFn := func(ctx context.Context, network, addr string) (net.Conn, error) {
-			c, err := v.dialer.DialContext(ctx, "tcp", v.addr)
+			c, err := v.dialTCP(ctx, v.addr)
 			if err != nil {
 				return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
 			}
@@ -668,7 +691,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 		makeTransport := func() http.RoundTripper {
 			return xhttp.NewTransport(
 				func(ctx context.Context) (net.Conn, error) {
-					return v.dialer.DialContext(ctx, "tcp", v.addr)
+					return v.dialTCP(ctx, v.addr)
 				},
 				func(ctx context.Context, raw net.Conn, isH2 bool) (net.Conn, error) {
 					return v.streamTLSConn(ctx, raw, isH2)
@@ -829,7 +852,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 			makeDownloadTransport = func() http.RoundTripper {
 				return xhttp.NewTransport(
 					func(ctx context.Context) (net.Conn, error) {
-						return v.dialer.DialContext(ctx, "tcp", downloadAddr)
+						return v.dialTCP(ctx, downloadAddr)
 					},
 					func(ctx context.Context, conn net.Conn, isH2 bool) (net.Conn, error) {
 						if downloadTLS {

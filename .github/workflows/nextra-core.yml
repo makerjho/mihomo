@@ -1,0 +1,59 @@
+name: NEXTRA Core Build
+
+on:
+  push:
+    branches: [nextra]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Test fragment layer
+        run: go test ./transport/fragment/ -count=1 -v
+
+      - name: Vet VLESS outbound
+        run: go vet -tags with_gvisor ./adapter/outbound/
+
+      - name: Build
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          VERSION="nextra-${GITHUB_SHA::7}"
+          BUILDTIME="$(date -u)"
+          LDF="-X 'github.com/metacubex/mihomo/constant.Version=${VERSION}' -X 'github.com/metacubex/mihomo/constant.BuildTime=${BUILDTIME}' -w -s -buildid="
+          mkdir -p dist
+          for t in windows/amd64 windows/arm64 darwin/arm64 darwin/amd64 linux/amd64; do
+            os=${t%/*}; arch=${t#*/}; ext=""; [ "$os" = windows ] && ext=".exe"
+            echo "== $os/$arch"
+            GOOS=$os GOARCH=$arch go build -tags with_gvisor -trimpath -ldflags "$LDF" -o "dist/mihomo-$os-$arch$ext" .
+          done
+          (cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nextra-core
+          path: dist/*
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="core-${{ github.run_number }}"
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "NEXTRA core ${VERSION}" \
+            --notes "mihomo + ClientHello fragmentation (NEXTRA_FRAGMENT_V1). Option: fragment-opts {length, interval, max-split}." \
+            --latest
