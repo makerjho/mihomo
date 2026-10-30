@@ -29,15 +29,29 @@ jobs:
         env:
           CGO_ENABLED: '0'
         run: |
-          VERSION="nextra-${GITHUB_SHA::7}"
+          VERSION="nextra-core-${{ github.run_number }}"
           BUILDTIME="$(date -u)"
           LDF="-X 'github.com/metacubex/mihomo/constant.Version=${VERSION}' -X 'github.com/metacubex/mihomo/constant.BuildTime=${BUILDTIME}' -w -s -buildid="
-          mkdir -p dist
-          for t in windows/amd64 windows/arm64 darwin/arm64 darwin/amd64 linux/amd64; do
-            os=${t%/*}; arch=${t#*/}; ext=""; [ "$os" = windows ] && ext=".exe"
-            echo "== $os/$arch"
-            GOOS=$os GOARCH=$arch go build -tags with_gvisor -trimpath -ldflags "$LDF" -o "dist/mihomo-$os-$arch$ext" .
-          done
+          mkdir -p bin dist
+          # Asset names match what the desktop app's prebuild expects
+          # (<name>-<version>.zip on Windows, .gz elsewhere).
+          build() { # os arch goamd64 name
+            echo "== $4"
+            GOOS=$1 GOARCH=$2 GOAMD64=$3 go build -tags with_gvisor -trimpath -ldflags "$LDF" -o "bin/$4$([ "$1" = windows ] && echo .exe)" .
+            if [ "$1" = windows ]; then
+              (cd bin && zip -q "../dist/$4-$VERSION.zip" "$4.exe")
+            else
+              gzip -c "bin/$4" > "dist/$4-$VERSION.gz"
+            fi
+          }
+          build windows amd64 v2 mihomo-windows-amd64-v2
+          build windows arm64 "" mihomo-windows-arm64
+          build darwin arm64 "" mihomo-darwin-arm64-go122
+          build darwin amd64 v1 mihomo-darwin-amd64-v1-go122
+          build darwin amd64 v2 mihomo-darwin-amd64-v2-go122
+          build linux amd64 v2 mihomo-linux-amd64-v2
+          build linux arm64 "" mihomo-linux-arm64
+          echo "$VERSION" > dist/version.txt
           (cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
@@ -50,8 +64,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="core-${{ github.run_number }}"
-          gh release create "$TAG" dist/* \
+          gh release create "$VERSION" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "NEXTRA core ${VERSION}" \
